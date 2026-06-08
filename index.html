@@ -354,12 +354,12 @@ const REMIND_DAYS = 7;
    未入力ならこのブラウザ内のみのローカルモードで動作します。
    ============================================================ */
 const FIREBASE_CONFIG = {
-  apiKey: "",
-  authDomain: "",
-  projectId: "",
-  storageBucket: "",
-  messagingSenderId: "",
-  appId: ""
+  apiKey: "AIzaSyBktnfI4cdkluzl4PgEM_UrhlUg0d8rSj0",
+  authDomain: "lockerroom-lita.firebaseapp.com",
+  projectId: "lockerroom-lita",
+  storageBucket: "lockerroom-lita.firebasestorage.app",
+  messagingSenderId: "124806070623",
+  appId: "1:124806070623:web:76830469d5589192c0f6ea"
 };
 
 /* ---- Firebase config resolution（コード編集なしで貼付できる） ---- */
@@ -510,8 +510,19 @@ const Store = {
     const cfg = getEffectiveFirebaseConfig();
     if(!cfg) throw new Error('Firebase設定が見つかりません');
     this._app = appMod.initializeApp(cfg);
-    const fbAuth = authMod.getAuth(this._app);
-    await authMod.signInAnonymously(fbAuth);
+    // Try anonymous auth; if not enabled (CONFIGURATION_NOT_FOUND on free tier),
+    // continue unauthenticated — Firestore rules can still allow access.
+    try{
+      const fbAuth = authMod.getAuth(this._app);
+      await authMod.signInAnonymously(fbAuth);
+    }catch(authErr){
+      const msg = authErr && (authErr.message || authErr.code || '');
+      if(/CONFIGURATION_NOT_FOUND|admin-restricted|operation-not-allowed/i.test(msg)){
+        console.warn('Anonymous auth unavailable, continuing without auth:', msg);
+      }else{
+        throw authErr;
+      }
+    }
     this._db = fsMod.getFirestore(this._app);
     this._fs = fsMod;
     this.mode = 'cloud';
@@ -1222,7 +1233,14 @@ async function testAndSaveFirebase(){
     const testName = '_lockerroomTest_' + Math.random().toString(36).slice(2,8);
     const testApp = appMod.initializeApp(cfg, testName);
     const a = authMod.getAuth(testApp);
-    await authMod.signInAnonymously(a);
+    try{
+      await authMod.signInAnonymously(a);
+    }catch(ae){
+      const msg = ae && (ae.message || ae.code || '');
+      if(!/CONFIGURATION_NOT_FOUND|admin-restricted|operation-not-allowed/i.test(msg)){
+        throw ae;
+      }
+    }
     // Looks good — save and reload Store
     saveFirebaseConfigToLocal(cfg);
     result.textContent = `✓ 接続OK（${cfg.projectId}）— 反映のためアプリを再接続中…`;

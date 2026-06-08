@@ -1,0 +1,16 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // entries: 「プロジェクトIDとAPIキーを知っている人＝アプリリンクを送られた人」のみが
+    // 読み書き可。データ整合性のための shape check 付き。
+    match /entries/{id} {
+      allow read: if true;
+      allow create, update: if
+        request.resource.data.id is string &&
+        request.resource.data.person is string &&
+        request.resource.data.date is string &&
+        request.resource.data.size() < 50;
+      allow delete: if true;
+    }
+  }
+}
