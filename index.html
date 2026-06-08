@@ -87,6 +87,12 @@
   /* reminder-related */
   .pill.reminder{background:#fde8ea;color:#b00020;border-color:#f3c4ca;cursor:pointer}
   .pill.reminder:hover{filter:brightness(.97)}
+  .pill.conn{background:#eef3fb;color:#34516e;border-color:#d6e0ee}
+  .pill.conn.cloud{background:#e6f4ee;color:#0a8043;border-color:#bfe2cf}
+  .pill.conn.error{background:#fde8ea;color:#b00020;border-color:#f3c4ca;cursor:help}
+  .pill.conn.local{background:#fff7e0;color:#7a5b00;border-color:#f0e1a8}
+  .creator{display:inline-flex;align-items:center;background:#eef3fb;color:#34516e;border:1px solid #d6e0ee;border-radius:999px;padding:1px 8px;font-size:10.5px;font-weight:600;letter-spacing:.02em}
+  .creator.mine{background:#e6f4ee;color:#0a8043;border-color:#bfe2cf}
   .pill.next{background:#eef1f5;color:var(--ink-2);border-color:var(--line)}
   .pill.next.due-soon{background:#fde8ea;color:#b00020;border-color:#f3c4ca}
   .pill.next.due-week{background:#fff3d6;color:#7a5b00;border-color:#f0d590}
@@ -113,6 +119,7 @@
   <h1>▶ <span class="accent">ロッカールーム</span> 管理</h1>
   <span class="pill" id="entryCount">0件</span>
   <span class="pill reminder" id="reminderPill" style="display:none" title="次回ロッカールーム日が1週間以内">🔔 今週のリマインド <span id="reminderCount">0</span>件</span>
+  <span class="pill conn" id="connPill" title="ストレージモード">接続中…</span>
   <div class="spacer"></div>
   <button class="btn ghost" id="btnSettings" title="自分のメールアドレスなどを設定">設定</button>
   <button class="btn ghost" id="btnImport" title="JSONからデータを読み込む">読込</button>
@@ -168,6 +175,9 @@
     <div class="toolbar">
       <span class="meta" id="resultMeta"></span>
       <span style="flex:1"></span>
+      <label style="display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--ink-2)">
+        <input type="checkbox" id="filterMineOnly"> 自分が登録した分のみ
+      </label>
       <label style="display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--ink-2)">
         <input type="checkbox" id="filterRemindOnly"> リマインド要のみ
       </label>
@@ -314,6 +324,21 @@ const TEMPLATE_KEY = 'lockerroom.template_b64.v1';
 const SETTINGS_KEY = 'lockerroom.settings.v1';
 const REMIND_DAYS = 7;
 
+/* ============================================================
+   FIREBASE（みんなで共有するための設定）
+   ここに Firebase のWebアプリ設定を貼り付けると、
+   全員のデータが共有・リアルタイム同期されます。
+   未入力ならこのブラウザ内のみのローカルモードで動作します。
+   ============================================================ */
+const FIREBASE_CONFIG = {
+  apiKey: "",
+  authDomain: "",
+  projectId: "",
+  storageBucket: "",
+  messagingSenderId: "",
+  appId: ""
+};
+
 /* ---------- Embedded template (base64 of the original pptx) ---------- */
 /* TEMPLATE_B64 is a long base64 string. It's loaded lazily and may also
    be replaced by the user via "import template" if needed.            */
@@ -328,26 +353,246 @@ let settings = {
   chatworkSelfId: ''
 };
 let editingId = null;
-let filter = { persons: new Set(), dateFrom: null, dateTo: null, search: '', sort: 'date_desc', remindOnly: false };
+let filter = { persons: new Set(), dateFrom: null, dateTo: null, search: '', sort: 'date_desc', remindOnly: false, mineOnly: false };
 
 /* ---------- Storage ---------- */
-function loadEntries(){
-  try{
-    const raw = localStorage.getItem(STORAGE_KEY);
-    entries = raw ? JSON.parse(raw) : [];
-  }catch(e){ entries = []; }
-  // Migrate older entries to new schema
-  for(const e of entries){
-    if(!('deadline' in e))             e.deadline = '';
-    if(!('nextDate' in e))             e.nextDate = '';
-    if(!('partnerEmail' in e))         e.partnerEmail = '';
-    if(!('partnerChatworkId' in e))    e.partnerChatworkId = '';
-    if(!('chatworkRoomId' in e))       e.chatworkRoomId = '';
-    if(!('lastReminderSentAt' in e))   e.lastReminderSentAt = '';
+function normalizeEntry(e){
+  if(!('deadline' in e))             e.deadline = '';
+  if(!('nextDate' in e))             e.nextDate = '';
+  if(!('partnerEmail' in e))         e.partnerEmail = '';
+  if(!('partnerChatworkId' in e))    e.partnerChatworkId = '';
+  if(!('chatworkRoomId' in e))       e.chatworkRoomId = '';
+  if(!('lastReminderSentAt' in e))   e.lastReminderSentAt = '';
+  if(!('createdBy' in e))            e.createdBy = '';
+  if(!('createdByEmail' in e))       e.createdByEmail = '';
+  return e;
+}
+
+/* ---- Storage abstraction（local / cloud(Firestore)） ---- */
+const Store = {
+  mode: 'local',           // 'local' | 'cloud'
+  status: 'init',          // 'init'|'connecting'|'local'|'cloud'|'error'
+  errorMsg: '',
+  _fs: null, _db: null, _unsub: null, _app: null,
+
+  isCloudConfigured(){
+    const c = FIREBASE_CONFIG;
+    return !!(c && c.projectId && c.apiKey && !c.projectId.startsWith('__'));
+  },
+
+  async init(){
+    if(this.isCloudConfigured()){
+      try{
+        await this._initCloud();
+        return;
+      }catch(err){
+        console.error('Firebase init failed:', err);
+        this.errorMsg = (err && err.message) || String(err);
+        this.status = 'error';
+        updateConnectionUI();
+        showToast('クラウド接続失敗 → ローカルモードで継続');
+      }
+    }
+    this._loadLocal();
+    this.mode = 'local';
+    this.status = 'local';
+    updateConnectionUI();
+    renderAll();
+  },
+
+  async _initCloud(){
+    this.status = 'connecting';
+    updateConnectionUI();
+    const [appMod, fsMod, authMod] = await Promise.all([
+      import('https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js'),
+      import('https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js'),
+      import('https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js'),
+    ]);
+    this._app = appMod.initializeApp(FIREBASE_CONFIG);
+    const fbAuth = authMod.getAuth(this._app);
+    await authMod.signInAnonymously(fbAuth);
+    this._db = fsMod.getFirestore(this._app);
+    this._fs = fsMod;
+    this.mode = 'cloud';
+    this.status = 'cloud';
+    updateConnectionUI();
+    // realtime subscribe
+    const col = fsMod.collection(this._db, 'entries');
+    this._unsub = fsMod.onSnapshot(col, (snap) => {
+      entries = snap.docs.map(d => normalizeEntry({ ...d.data(), id: d.id }));
+      renderAll();
+      maybeOfferMigration();
+    }, (err) => {
+      console.error('snapshot error:', err);
+      this.status = 'error';
+      this.errorMsg = err.message || String(err);
+      updateConnectionUI();
+      showToast('クラウド同期エラー：' + (err.message||''));
+    });
+  },
+
+  _loadLocal(){
+    try{
+      const raw = localStorage.getItem(STORAGE_KEY);
+      entries = raw ? JSON.parse(raw) : [];
+    }catch(e){ entries = []; }
+    for(const e of entries) normalizeEntry(e);
+  },
+  _saveLocal(){
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(entries));
+  },
+
+  _stamp(e){
+    const now = Date.now();
+    if(!e.createdAt) e.createdAt = now;
+    e.updatedAt = now;
+    if(!e.createdBy      && settings.selfName)  e.createdBy      = settings.selfName;
+    if(!e.createdByEmail && settings.selfEmail) e.createdByEmail = settings.selfEmail;
+    normalizeEntry(e);
+  },
+
+  async upsert(e){
+    this._stamp(e);
+    // optimistic local update first (UI reflects instantly)
+    const i = entries.findIndex(x => x.id === e.id);
+    if(i >= 0) entries[i] = e; else entries.push(e);
+    renderAll();
+    if(this.mode === 'cloud'){
+      try{
+        await this._fs.setDoc(this._fs.doc(this._db, 'entries', e.id), e);
+      }catch(err){
+        console.error(err);
+        showToast('クラウド保存に失敗：' + err.message);
+      }
+    }else{
+      this._saveLocal();
+    }
+  },
+
+  async remove(id){
+    entries = entries.filter(x => x.id !== id);
+    renderAll();
+    if(this.mode === 'cloud'){
+      try{
+        await this._fs.deleteDoc(this._fs.doc(this._db, 'entries', id));
+      }catch(err){
+        console.error(err);
+        showToast('クラウド削除に失敗：' + err.message);
+      }
+    }else{
+      this._saveLocal();
+    }
+  },
+
+  async clearAll(){
+    if(this.mode === 'cloud'){
+      const snap = await this._fs.getDocs(this._fs.collection(this._db, 'entries'));
+      const batch = this._fs.writeBatch(this._db);
+      snap.docs.forEach(d => batch.delete(d.ref));
+      await batch.commit();
+    }else{
+      entries = [];
+      this._saveLocal();
+      renderAll();
+    }
+  },
+
+  /* Clear only entries created by me (cloud) — local has no notion of "others" */
+  async clearMine(){
+    const myKey = (settings.selfEmail || settings.selfName || '').toLowerCase();
+    if(!myKey){ throw new Error('自分の名前/メールが設定されていません'); }
+    const mine = entries.filter(e =>
+      (e.createdByEmail||'').toLowerCase() === myKey ||
+      (e.createdBy||'').toLowerCase()      === myKey);
+    if(this.mode === 'cloud'){
+      const batch = this._fs.writeBatch(this._db);
+      mine.forEach(e => batch.delete(this._fs.doc(this._db, 'entries', e.id)));
+      await batch.commit();
+    }else{
+      entries = entries.filter(e => !mine.includes(e));
+      this._saveLocal();
+      renderAll();
+    }
+    return mine.length;
+  },
+
+  async bulkUpsert(list){
+    if(this.mode === 'cloud'){
+      // batched writes (max 500 per batch)
+      for(let i=0; i<list.length; i+=400){
+        const slice = list.slice(i, i+400);
+        const batch = this._fs.writeBatch(this._db);
+        for(const e of slice){
+          this._stamp(e);
+          batch.set(this._fs.doc(this._db, 'entries', e.id), e);
+        }
+        await batch.commit();
+      }
+    }else{
+      for(const e of list){
+        this._stamp(e);
+        const i = entries.findIndex(x => x.id === e.id);
+        if(i >= 0) entries[i] = e; else entries.push(e);
+      }
+      this._saveLocal();
+      renderAll();
+    }
+  }
+};
+
+/* legacy shim — some places still call saveEntries() expecting full re-save */
+function saveEntries(){
+  if(Store.mode === 'local') Store._saveLocal();
+}
+
+function updateConnectionUI(){
+  const pill = document.getElementById('connPill');
+  if(!pill) return;
+  pill.classList.remove('cloud','local','error');
+  switch(Store.status){
+    case 'cloud':
+      pill.classList.add('cloud');
+      pill.textContent = '☁ 共有モード';
+      pill.title = `クラウド同期中 (${FIREBASE_CONFIG.projectId})`;
+      break;
+    case 'local':
+      pill.classList.add('local');
+      pill.textContent = '💾 ローカル';
+      pill.title = '共有設定なし — このブラウザ内のみ保存';
+      break;
+    case 'connecting':
+      pill.textContent = '⏳ 接続中…';
+      pill.title = 'クラウドに接続しています';
+      break;
+    case 'error':
+      pill.classList.add('error');
+      pill.textContent = '⚠ 接続失敗';
+      pill.title = 'クラウド接続に失敗 — ローカルで動作中：' + (Store.errorMsg||'');
+      break;
+    default:
+      pill.textContent = '接続中…';
   }
 }
-function saveEntries(){
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(entries));
+
+/* migration UI: if cloud is empty AND localStorage has entries, offer to upload */
+let _migrationOffered = false;
+function maybeOfferMigration(){
+  if(_migrationOffered) return;
+  if(Store.mode !== 'cloud') return;
+  if(entries.length > 0) return; // cloud already has data
+  let localRaw = null;
+  try{ localRaw = localStorage.getItem(STORAGE_KEY); }catch(e){}
+  if(!localRaw) return;
+  let local;
+  try{ local = JSON.parse(localRaw); }catch(e){ return; }
+  if(!Array.isArray(local) || local.length === 0) return;
+  _migrationOffered = true;
+  setTimeout(()=>{
+    if(confirm(`このブラウザに保存されたローカル ${local.length} 件を、共有データベースにアップロードしますか？`)){
+      local.forEach(normalizeEntry);
+      Store.bulkUpsert(local).then(()=>showToast(`${local.length} 件をアップロードしました`));
+    }
+  }, 600);
 }
 function loadSettings(){
   try{
@@ -432,6 +677,13 @@ function applyFilters(list){
   }
   if(filter.remindOnly){
     out = out.filter(e => reminderState(e).needsReminder);
+  }
+  if(filter.mineOnly){
+    const me = (settings.selfEmail||'').toLowerCase();
+    const meName = (settings.selfName||'').toLowerCase();
+    out = out.filter(e =>
+      (me     && (e.createdByEmail||'').toLowerCase() === me) ||
+      (meName && (e.createdBy||'').toLowerCase()      === meName));
   }
   switch(filter.sort){
     case 'date_asc':    out.sort((a,b)=> (a.date||'').localeCompare(b.date||'') || (a.person||'').localeCompare(b.person||'','ja')); break;
@@ -540,11 +792,20 @@ function renderCards(){
     const remindBtn = rs.needsReminder
       ? `<button class="btn sm" data-act="remind" title="${channelTitle}" style="border-color:#f3c4ca;color:#b00020">${channelLabel}</button>`
       : '';
+    const meKey = (settings.selfEmail||'').toLowerCase();
+    const meName = (settings.selfName||'').toLowerCase();
+    const isMine =
+      (meKey  && (e.createdByEmail||'').toLowerCase() === meKey) ||
+      (meName && (e.createdBy||'').toLowerCase()      === meName);
+    const creatorBadge = e.createdBy
+      ? `<span class="creator ${isMine?'mine':''}" title="${escapeXml(e.createdByEmail||'')}">👤 ${escapeXml(e.createdBy)}${isMine?'（自分）':''}</span>`
+      : '';
     return `<div class="card ${rs.needsReminder?'reminding':''}" data-id="${e.id}">
       <div class="head">
         <span class="person">${escapeXml(e.person||'(無名)')}</span>
         <span class="date">${formatDateJa(e.date)}</span>
         <span style="flex:1"></span>
+        ${creatorBadge}
         ${nextPill}
       </div>
       ${metaRow}
@@ -655,13 +916,11 @@ function commitForm(){
   const now = Date.now();
   if(editingId){
     const e = entries.find(x=>x.id===editingId);
-    if(e){ Object.assign(e, d, { updatedAt: now }); }
-    saveEntries(); renderAll();
+    if(e){ Object.assign(e, d, { updatedAt: now }); Store.upsert(e); }
     return e;
   }else{
     const e = { id: uid(), ...d, createdAt: now, updatedAt: now };
-    entries.push(e);
-    saveEntries(); renderAll();
+    Store.upsert(e);
     editingId = e.id;
     return e;
   }
@@ -674,8 +933,7 @@ function handleCardAction(id, act){
   if(act === 'edit') return openModal(e);
   if(act === 'dup'){
     const copy = { ...e, id: uid(), date: todayIso(), nextDate: '', createdAt: Date.now(), updatedAt: Date.now() };
-    entries.push(copy);
-    saveEntries(); renderAll();
+    Store.upsert(copy);
     showToast('複製しました');
     return;
   }
@@ -683,9 +941,7 @@ function handleCardAction(id, act){
   if(act === 'remind') return sendReminder(e);
   if(act === 'del'){
     if(confirm(`「${e.person} / ${formatDateJa(e.date)}」を削除しますか？`)){
-      entries = entries.filter(x=>x.id!==id);
-      saveEntries(); renderAll();
-      showToast('削除しました');
+      Store.remove(id).then(()=> showToast('削除しました'));
     }
   }
 }
@@ -769,12 +1025,12 @@ async function sendReminder(e){
     if(ch === 'chatwork'){
       await sendReminderChatwork(e);
       e.lastReminderSentAt = new Date().toISOString();
-      saveEntries(); renderAll();
+      await Store.upsert(e);
       showToast(`ChatWorkに送信しました（${e.person||''}）`);
     }else{
       const r = sendReminderMailto(e);
       e.lastReminderSentAt = new Date().toISOString();
-      saveEntries(); renderAll();
+      await Store.upsert(e);
       showToast(`メール下書きを開きました（${r.tos.length}名宛）`);
     }
   }catch(err){
@@ -800,10 +1056,12 @@ async function sendAllReminders(){
   if(!ok) return;
 
   let sent = 0, failed = 0;
+  const updated = [];
   for(const e of sendable){
     try{
       await sendReminderChatwork(e);
       e.lastReminderSentAt = new Date().toISOString();
+      updated.push(e);
       sent++;
     }catch(err){
       console.error('failed for', e.person, err);
@@ -811,7 +1069,7 @@ async function sendAllReminders(){
     }
     await new Promise(r => setTimeout(r, 350)); // light rate-limit
   }
-  saveEntries(); renderAll();
+  if(updated.length) await Store.bulkUpsert(updated);
   showToast(`送信完了：成功 ${sent} / 失敗 ${failed}`);
 }
 
@@ -994,33 +1252,39 @@ function exportJson(){
 }
 function importJson(file){
   const r = new FileReader();
-  r.onload = () => {
+  r.onload = async () => {
     try{
       const obj = JSON.parse(r.result);
       const incoming = Array.isArray(obj) ? obj : (obj.entries || []);
       if(!Array.isArray(incoming)) throw new Error('JSON形式が不正です');
       const existing = new Map(entries.map(e=>[e.id,e]));
-      let added=0, updated=0;
+      let added=0, updatedC=0;
+      const toUpsert = [];
       for(const e of incoming){
         if(!e || typeof e !== 'object') continue;
         const norm = {
           id: e.id || uid(),
           person: String(e.person||''),
           date: String(e.date||todayIso()),
+          deadline: String(e.deadline||''),
+          nextDate: String(e.nextDate||''),
+          partnerEmail: String(e.partnerEmail||''),
+          partnerChatworkId: String(e.partnerChatworkId||''),
+          chatworkRoomId: String(e.chatworkRoomId||''),
           scene: String(e.scene||''),
           outcome: String(e.outcome||''),
           action: String(e.action||''),
+          lastReminderSentAt: String(e.lastReminderSentAt||''),
+          createdBy: String(e.createdBy||''),
+          createdByEmail: String(e.createdByEmail||''),
           createdAt: e.createdAt || Date.now(),
           updatedAt: e.updatedAt || Date.now(),
         };
-        if(existing.has(norm.id)){
-          Object.assign(existing.get(norm.id), norm); updated++;
-        }else{
-          entries.push(norm); existing.set(norm.id, norm); added++;
-        }
+        if(existing.has(norm.id)) updatedC++; else added++;
+        toUpsert.push(norm);
       }
-      saveEntries(); renderAll();
-      showToast(`読込完了：追加 ${added} / 更新 ${updated}`);
+      await Store.bulkUpsert(toUpsert);
+      showToast(`読込完了：追加 ${added} / 更新 ${updatedC}`);
     }catch(err){
       alert('読み込みに失敗しました：' + err.message);
     }
@@ -1066,6 +1330,9 @@ function bind(){
   document.getElementById('filterRemindOnly').addEventListener('change', ev=>{
     filter.remindOnly = ev.target.checked; renderCards();
   });
+  document.getElementById('filterMineOnly').addEventListener('change', ev=>{
+    filter.mineOnly = ev.target.checked; renderCards();
+  });
   document.getElementById('btnFilterReminder').addEventListener('click', ()=>{
     filter.remindOnly = true;
     document.getElementById('filterRemindOnly').checked = true;
@@ -1098,9 +1365,27 @@ function bind(){
   document.getElementById('btnDownloadTemplate').addEventListener('click', downloadEmptyTemplate);
   document.getElementById('btnClearAll').addEventListener('click', ()=>{
     if(entries.length === 0){ showToast('データはありません'); return; }
-    if(confirm(`本当に ${entries.length} 件すべて削除しますか？（この操作は取り消せません）`)){
-      entries = []; saveEntries(); renderAll();
-      showToast('全データを削除しました');
+    if(Store.mode === 'cloud'){
+      const opt = prompt(
+        `共有モードです。削除対象を入力してください：\n` +
+        `  "mine"  → 自分が登録した分のみ削除\n` +
+        `  "all"   → 全員のデータを削除（注意）\n` +
+        `空欄またはキャンセルで何もしません。`,
+        'mine'
+      );
+      if(opt === 'mine'){
+        Store.clearMine()
+          .then(n => showToast(`自分の ${n} 件を削除しました`))
+          .catch(err => alert(err.message));
+      }else if(opt === 'all'){
+        if(confirm(`本当に共有データベース全件（${entries.length}件）を削除しますか？取り消せません。`)){
+          Store.clearAll().then(()=>showToast('全データを削除しました'));
+        }
+      }
+    }else{
+      if(confirm(`本当に ${entries.length} 件すべて削除しますか？（この操作は取り消せません）`)){
+        Store.clearAll().then(()=>showToast('全データを削除しました'));
+      }
     }
   });
 
@@ -1116,10 +1401,10 @@ function bind(){
 }
 
 /* ---------- Init ---------- */
-loadEntries();
 loadSettings();
 bind();
 renderAll();
+Store.init();
 </script>
 </body>
 </html>
