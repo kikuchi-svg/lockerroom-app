@@ -280,6 +280,28 @@
         </div>
       </div>
       <div style="border-top:1px solid var(--line);padding-top:12px;margin-top:2px">
+        <div style="font-size:12px;font-weight:700;color:var(--accent);letter-spacing:.04em;margin-bottom:8px">共有データベース（FIREBASE）</div>
+        <div style="font-size:11.5px;color:var(--ink-2);margin-bottom:8px;line-height:1.65">
+          全員のデータをアプリ上で見るには Firebase Firestore を1度だけ設定します（無料・約5分）。<br>
+          手順は <a href="https://github.com/kikuchi-svg/lockerroom-app/blob/main/README.md#firebase共有モードの設定" target="_blank" rel="noopener">README</a> 参照。下のテキストエリアに <code>firebaseConfig</code> オブジェクトを貼り付けて「接続テスト」をクリック。
+        </div>
+        <div class="field-group">
+          <label for="sFbConfig">Firebase config <span class="hint">（apiKey, projectId, ... を含むJSONまたはJS object）</span></label>
+          <textarea id="sFbConfig" rows="6" placeholder='{ "apiKey": "...", "authDomain": "....firebaseapp.com", "projectId": "...", "storageBucket": "...", "messagingSenderId": "...", "appId": "..." }' style="font-family:Consolas,monospace;font-size:12px"></textarea>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;align-items:center">
+          <button class="btn sm" id="btnTestFirebase">接続テスト & 保存</button>
+          <button class="btn sm" id="btnCopyShareUrl">📋 チーム共有リンクをコピー</button>
+          <button class="btn sm ghost" id="btnDisconnectFirebase">解除</button>
+          <span id="fbTestResult" style="font-size:12px;color:var(--ink-2);align-self:center"></span>
+        </div>
+        <div id="shareUrlWrap" style="display:none;margin-top:8px;background:#f5f6f8;border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:11.5px;line-height:1.6">
+          <b>このリンクをチームに送ってください：</b><br>
+          <code id="shareUrlText" style="word-break:break-all;color:#34516e"></code><br>
+          <span style="color:var(--ink-2)">リンクを開くと自動で同じ共有データベースに接続されます。</span>
+        </div>
+      </div>
+      <div style="border-top:1px solid var(--line);padding-top:12px;margin-top:2px">
         <div style="font-size:12px;font-weight:700;color:var(--accent);letter-spacing:.04em;margin-bottom:8px">CHATWORK 連携</div>
         <div class="row">
           <div class="field-group">
@@ -322,6 +344,7 @@
 const STORAGE_KEY = 'lockerroom.entries.v1';
 const TEMPLATE_KEY = 'lockerroom.template_b64.v1';
 const SETTINGS_KEY = 'lockerroom.settings.v1';
+const FBCONFIG_KEY = 'lockerroom.firebase_config.v1';
 const REMIND_DAYS = 7;
 
 /* ============================================================
@@ -338,6 +361,83 @@ const FIREBASE_CONFIG = {
   messagingSenderId: "",
   appId: ""
 };
+
+/* ---- Firebase config resolution（コード編集なしで貼付できる） ---- */
+let _effectiveFbConfig = null;
+function loadFirebaseConfigFromLocal(){
+  try{
+    const raw = localStorage.getItem(FBCONFIG_KEY);
+    if(!raw) return null;
+    const c = JSON.parse(raw);
+    return (c && c.projectId && c.apiKey) ? c : null;
+  }catch(e){ return null; }
+}
+function saveFirebaseConfigToLocal(c){
+  _effectiveFbConfig = null;
+  if(!c){ localStorage.removeItem(FBCONFIG_KEY); return; }
+  localStorage.setItem(FBCONFIG_KEY, JSON.stringify(c));
+}
+function maybeImportConfigFromUrl(){
+  try{
+    const h = location.hash || '';
+    const m = h.match(/[#&]config=([^&]+)/);
+    if(!m) return null;
+    const b64 = decodeURIComponent(m[1]);
+    const json = atob(b64.replace(/-/g,'+').replace(/_/g,'/'));
+    const c = JSON.parse(json);
+    if(c && c.projectId && c.apiKey){
+      saveFirebaseConfigToLocal(c);
+      // clean URL but keep other hash params
+      const rest = h.replace(/[#&]?config=[^&]+/, '');
+      history.replaceState(null, '', location.pathname + location.search + (rest && rest !== '#' ? rest : ''));
+      return c;
+    }
+  }catch(e){ console.error('config URL parse failed', e); }
+  return null;
+}
+function getEffectiveFirebaseConfig(){
+  if(_effectiveFbConfig) return _effectiveFbConfig;
+  const local = loadFirebaseConfigFromLocal();
+  if(local){ _effectiveFbConfig = local; return local; }
+  if(FIREBASE_CONFIG && FIREBASE_CONFIG.projectId && FIREBASE_CONFIG.apiKey){
+    _effectiveFbConfig = FIREBASE_CONFIG;
+    return FIREBASE_CONFIG;
+  }
+  return null;
+}
+function generateShareUrl(){
+  const c = getEffectiveFirebaseConfig();
+  if(!c) return null;
+  // strip extra fields, keep only the standard 6
+  const clean = {
+    apiKey: c.apiKey, authDomain: c.authDomain, projectId: c.projectId,
+    storageBucket: c.storageBucket||'', messagingSenderId: c.messagingSenderId||'',
+    appId: c.appId
+  };
+  const json = JSON.stringify(clean);
+  // url-safe base64
+  const b64 = btoa(unescape(encodeURIComponent(json)))
+    .replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+  return `${location.origin}${location.pathname}#config=${b64}`;
+}
+function parseConfigInput(text){
+  // Accepts JSON object OR JS-style object literal (apiKey: "...", ...)
+  const t = (text||'').trim();
+  if(!t) return null;
+  // try strict JSON first
+  try{ return JSON.parse(t); }catch(e){ /* fall through */ }
+  // try as JS object literal — wrap in parens, eval safely with Function
+  try{
+    // pre-process: ensure trailing commas don't break, and convert single quotes
+    const wrapped = t
+      .replace(/^const\s+\w+\s*=\s*/,'')
+      .replace(/;[\s]*$/,'')
+      .trim();
+    const obj = (new Function(`return (${wrapped});`))();
+    if(obj && typeof obj === 'object') return obj;
+  }catch(e){ /* fall through */ }
+  return null;
+}
 
 /* ---------- Embedded template (base64 of the original pptx) ---------- */
 /* TEMPLATE_B64 is a long base64 string. It's loaded lazily and may also
@@ -376,8 +476,7 @@ const Store = {
   _fs: null, _db: null, _unsub: null, _app: null,
 
   isCloudConfigured(){
-    const c = FIREBASE_CONFIG;
-    return !!(c && c.projectId && c.apiKey && !c.projectId.startsWith('__'));
+    return !!getEffectiveFirebaseConfig();
   },
 
   async init(){
@@ -408,7 +507,9 @@ const Store = {
       import('https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js'),
       import('https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js'),
     ]);
-    this._app = appMod.initializeApp(FIREBASE_CONFIG);
+    const cfg = getEffectiveFirebaseConfig();
+    if(!cfg) throw new Error('Firebase設定が見つかりません');
+    this._app = appMod.initializeApp(cfg);
     const fbAuth = authMod.getAuth(this._app);
     await authMod.signInAnonymously(fbAuth);
     this._db = fsMod.getFirestore(this._app);
@@ -553,7 +654,7 @@ function updateConnectionUI(){
     case 'cloud':
       pill.classList.add('cloud');
       pill.textContent = '☁ 共有モード';
-      pill.title = `クラウド同期中 (${FIREBASE_CONFIG.projectId})`;
+      pill.title = `クラウド同期中 (${(getEffectiveFirebaseConfig()||{}).projectId||''})`;
       break;
     case 'local':
       pill.classList.add('local');
@@ -1080,6 +1181,12 @@ function openSettings(){
   document.getElementById('sChatworkToken').value  = settings.chatworkToken  || '';
   document.getElementById('sChatworkSelfId').value = settings.chatworkSelfId || '';
   document.getElementById('cwTestResult').textContent = '';
+  // Firebase config
+  const fb = getEffectiveFirebaseConfig();
+  document.getElementById('sFbConfig').value = fb ? JSON.stringify(fb, null, 2) : '';
+  document.getElementById('fbTestResult').textContent = fb ? `現在接続中：${fb.projectId}` : '未設定';
+  document.getElementById('fbTestResult').style.color = fb ? '#0a8043' : 'var(--ink-2)';
+  if(fb) showShareUrl(); else document.getElementById('shareUrlWrap').style.display = 'none';
   document.getElementById('settingsBack').classList.add('open');
 }
 function closeSettings(){ document.getElementById('settingsBack').classList.remove('open'); }
@@ -1093,6 +1200,82 @@ function commitSettings(){
   renderAll();
   showToast('設定を保存しました');
 }
+async function testAndSaveFirebase(){
+  const ta = document.getElementById('sFbConfig');
+  const result = document.getElementById('fbTestResult');
+  const text = ta.value.trim();
+  if(!text){ result.textContent = '設定を貼り付けてください'; result.style.color = '#b00020'; return; }
+  const cfg = parseConfigInput(text);
+  if(!cfg || !cfg.projectId || !cfg.apiKey){
+    result.textContent = '✗ 形式が不正です（apiKey と projectId は必須）';
+    result.style.color = '#b00020';
+    return;
+  }
+  result.textContent = '接続中…'; result.style.color = 'var(--ink-2)';
+  try{
+    // Try a tiny init + auth dance to verify it works
+    const [appMod, authMod] = await Promise.all([
+      import('https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js'),
+      import('https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js'),
+    ]);
+    // Use a uniquely named app to avoid colliding with any existing one
+    const testName = '_lockerroomTest_' + Math.random().toString(36).slice(2,8);
+    const testApp = appMod.initializeApp(cfg, testName);
+    const a = authMod.getAuth(testApp);
+    await authMod.signInAnonymously(a);
+    // Looks good — save and reload Store
+    saveFirebaseConfigToLocal(cfg);
+    result.textContent = `✓ 接続OK（${cfg.projectId}）— 反映のためアプリを再接続中…`;
+    result.style.color = '#0a8043';
+    showShareUrl();
+    // re-init Store to switch to cloud
+    if(Store._unsub){ try{ Store._unsub(); }catch(e){} }
+    await Store.init();
+    showToast('共有モードに切り替えました');
+  }catch(err){
+    result.textContent = '✗ 失敗：' + err.message;
+    result.style.color = '#b00020';
+  }
+}
+
+function showShareUrl(){
+  const url = generateShareUrl();
+  const wrap = document.getElementById('shareUrlWrap');
+  const txt  = document.getElementById('shareUrlText');
+  if(!url){ wrap.style.display = 'none'; return; }
+  txt.textContent = url;
+  wrap.style.display = '';
+}
+
+async function copyShareUrl(){
+  const url = generateShareUrl();
+  if(!url){ showToast('先にFirebase設定を保存してください'); return; }
+  try{
+    await navigator.clipboard.writeText(url);
+    showToast('共有リンクをコピーしました');
+  }catch(e){
+    // fallback for older browsers
+    const ta = document.createElement('textarea');
+    ta.value = url; document.body.appendChild(ta); ta.select();
+    try{ document.execCommand('copy'); showToast('共有リンクをコピーしました'); }
+    catch(_){ alert(url); }
+    ta.remove();
+  }
+  showShareUrl();
+}
+
+async function disconnectFirebase(){
+  if(!confirm('Firebase設定を解除しますか？\n（このブラウザは「ローカルモード」に戻ります。クラウド側のデータは消えません）')) return;
+  saveFirebaseConfigToLocal(null);
+  if(Store._unsub){ try{ Store._unsub(); }catch(e){} }
+  document.getElementById('sFbConfig').value = '';
+  document.getElementById('fbTestResult').textContent = '解除しました（ローカルモード）';
+  document.getElementById('fbTestResult').style.color = 'var(--ink-2)';
+  document.getElementById('shareUrlWrap').style.display = 'none';
+  await Store.init();
+  showToast('Firebase設定を解除しました');
+}
+
 async function testChatworkConnection(){
   const token = document.getElementById('sChatworkToken').value.trim();
   const result = document.getElementById('cwTestResult');
@@ -1344,6 +1527,9 @@ function bind(){
   document.getElementById('btnSettingsCancel').addEventListener('click', closeSettings);
   document.getElementById('btnSettingsSave').addEventListener('click', commitSettings);
   document.getElementById('btnTestChatwork').addEventListener('click', testChatworkConnection);
+  document.getElementById('btnTestFirebase').addEventListener('click', testAndSaveFirebase);
+  document.getElementById('btnCopyShareUrl').addEventListener('click', copyShareUrl);
+  document.getElementById('btnDisconnectFirebase').addEventListener('click', disconnectFirebase);
   document.getElementById('settingsBack').addEventListener('click', ev=>{
     if(ev.target.id === 'settingsBack') closeSettings();
   });
@@ -1401,10 +1587,14 @@ function bind(){
 }
 
 /* ---------- Init ---------- */
+const _importedConfig = maybeImportConfigFromUrl();
 loadSettings();
 bind();
 renderAll();
 Store.init();
+if(_importedConfig){
+  setTimeout(()=>showToast('共有データベースの設定を取り込みました（' + _importedConfig.projectId + '）'), 400);
+}
 </script>
 </body>
 </html>

@@ -75,32 +75,21 @@ service cloud.firestore {
 3. アプリのニックネーム（例：`lockerroom-web`）を入力 → 登録
 4. 表示される `firebaseConfig` オブジェクトをコピー（apiKey, authDomain, projectId など）
 
-### 6. アプリに貼り付け
+### 6. アプリに貼り付け（コード編集不要）
 
-`index.html` を開いて、次の部分を埋める：
+1. アプリを開く → 右上「**設定**」
+2. 「**共有データベース（FIREBASE）**」の欄に、コピーした `firebaseConfig` をそのまま貼り付け
+3. 「**接続テスト & 保存**」をクリック
+4. 「✓ 接続OK」と表示されたら成功 → 自動で共有モードに切り替わる
 
-```js
-const FIREBASE_CONFIG = {
-  apiKey: "...",
-  authDomain: "....firebaseapp.com",
-  projectId: "...",
-  storageBucket: "....appspot.com",
-  messagingSenderId: "...",
-  appId: "..."
-};
-```
+### 7. チームに共有
 
-### 7. デプロイ
-
-```bash
-git add index.html
-git commit -m "feat: connect Firebase"
-git push
-```
-
-GitHub Pagesが1〜2分で反映 → リロードすると ☁ 共有モード になります。
+設定保存後、同じ画面に表示される「**📋 チーム共有リンクをコピー**」を押す。
+そのURLをChatWork/メールでチームに送ると、**他の人はリンクを開くだけで同じ共有データベースに接続**されます。
 
 > **既存のローカルデータがある場合**: 共有モードに切り替えて最初に開くと、「ローカルに N 件あります。共有データベースにアップロードしますか？」と確認が出ます。
+
+> **解除したい場合**: 設定→「解除」でこのブラウザだけローカルモードに戻せます。クラウドのデータは消えません。
 
 ## ChatWork 連携
 
